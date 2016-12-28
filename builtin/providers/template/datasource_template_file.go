@@ -1,11 +1,14 @@
 package template
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/hashicorp/hil"
@@ -24,8 +27,7 @@ func dataSourceFile() *schema.Resource {
 				Type:          schema.TypeString,
 				Optional:      true,
 				Description:   "Contents of the template",
-				ConflictsWith: []string{"filename"},
-			},
+				ConflictsWith: []string{"filename"}, },
 			"filename": &schema.Schema{
 				Type:        schema.TypeString,
 				Optional:    true,
@@ -55,6 +57,11 @@ func dataSourceFile() *schema.Resource {
 				Description:  "variables to substitute",
 				ValidateFunc: validateVarsAttribute,
 			},
+			"post_render": &schema.Schema{
+				Type:        schema.TypeString,
+				Optional:    true,
+				Description: "post processing script to run after template is rendered.",
+			},
 			"rendered": &schema.Schema{
 				Type:        schema.TypeString,
 				Computed:    true,
@@ -80,6 +87,7 @@ func renderFile(d *schema.ResourceData) (string, error) {
 	template := d.Get("template").(string)
 	filename := d.Get("filename").(string)
 	vars := d.Get("vars").(map[string]interface{})
+	postRender := d.Get("post_render").(string)
 
 	contents := template
 	if template == "" && filename != "" {
@@ -98,7 +106,44 @@ func renderFile(d *schema.ResourceData) (string, error) {
 		)
 	}
 
+	if postRender != "" {
+		rendered, err = executeScript(postRender, rendered)
+		if err != nil {
+			return "", templateRenderError(
+				fmt.Errorf("post_render script failed to render %v: %v", filename, err),
+			)
+		}
+	}
+
 	return rendered, nil
+}
+
+func executeScript(command, rendered string) (string, error) {
+	// Execute the command using a shell
+	var shell, flag string
+	if runtime.GOOS == "windows" {
+		shell = "cmd"
+		flag = "/C"
+	} else {
+		shell = "/bin/sh"
+		flag = "-c"
+	}
+
+	// Setup the command
+	cmd := exec.Command(shell, flag, command)
+	output := new(bytes.Buffer)
+	cmd.Stdin = bytes.NewBufferString(rendered)
+	cmd.Stderr = output
+	cmd.Stdout = output
+	// Run the command to completion
+	err := cmd.Run()
+
+	if err != nil {
+		return "", fmt.Errorf("Error running command '%s': %v. Output: %s",
+			command, err, output.Bytes())
+	}
+
+	return output.String(), nil
 }
 
 // execute parses and executes a template using vars.
